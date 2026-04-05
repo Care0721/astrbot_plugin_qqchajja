@@ -4,25 +4,25 @@
     "properties": {
         "target_groups": {
             "type": "array",
-            "description": "监听群聊列表",
+            "description": "监听的QQ群ID列表，留空则监听所有群",
             "items": {"type": "string"},
             "default": []
         },
         "admin_ids": {
             "type": "array",
-            "description": "管理员QQ号列表",
+            "description": "管理员QQ号列表（可执行管理命令）",
             "items": {"type": "string"},
             "default": ["3524815759"]
         },
-        "enable_auto_save": {
+        "auto_quote_enabled": {
             "type": "boolean",
-            "description": "是否自动保存求购信息",
-            "default": true
+            "description": "是否开启自动报价",
+            "default": false
         },
-        "web_api_port": {
+        "default_template_id": {
             "type": "integer",
-            "description": "Web API端口（供网站调用）",
-            "default": 8080
+            "description": "默认报价模板ID",
+            "default": 1
         }
     }
 }
