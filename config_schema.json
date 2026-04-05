@@ -17,7 +17,7 @@
         "auto_quote_enabled": {
             "type": "boolean",
             "description": "是否开启自动报价",
-            "default": false
+            "default": true
         },
         "default_template_id": {
             "type": "integer",
