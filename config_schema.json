@@ -1,0 +1,28 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+        "target_groups": {
+            "type": "array",
+            "description": "监听的QQ群ID列表（留空则监听所有群）",
+            "items": {"type": "string"},
+            "default": []
+        },
+        "admin_ids": {
+            "type": "array",
+            "description": "管理员QQ号列表",
+            "items": {"type": "string"},
+            "default": ["12345678"]
+        },
+        "enable_auto_save": {
+            "type": "boolean",
+            "description": "是否自动保存求购信息",
+            "default": true
+        },
+        "web_api_port": {
+            "type": "integer",
+            "description": "Web API端口（供网站调用）",
+            "default": 8080
+        }
+    }
+}
