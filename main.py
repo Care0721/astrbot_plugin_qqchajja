@@ -1,6 +1,7 @@
 """
 采销助手插件 for AstrBot
 功能：自动识别求购/供应/询价，匹配库存，记录报价/供应，支持多编码回复。
+新增：将收到的每条消息保存到本地 TXT 文件（按日期分文件）
 """
 
 import json
@@ -25,12 +26,16 @@ PURCHASE_KEYWORDS = ['求购', '收购', '需要', '买']
 SUPPLY_KEYWORDS = ['供应', '出售', '提供', '有货', '报价']
 INQUIRY_KEYWORDS = ['询价', '多少钱', '价格', '报价多少']
 
-@register("sales_purchase_assistant", "采销助手", "自动抓取求购/供应，智能匹配报价", "2.1.0")
+@register("sales_purchase_assistant", "采销助手", "自动抓取求购/供应，智能匹配报价", "2.2.0")
 class SalesPurchaseAssistant(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         self.db_path = Path(__file__).parent / "sp_assistant.db"
         self._init_database()
+        
+        # 消息保存目录
+        self.messages_dir = Path(__file__).parent / "saved_messages"
+        self.messages_dir.mkdir(exist_ok=True)
         
         self.target_groups = self._get_config("target_groups", [])
         self.admin_ids = self._get_config("admin_ids", ["3524815759"])
@@ -49,6 +54,8 @@ class SalesPurchaseAssistant(Star):
     def _init_database(self):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
+        
+        # 库存表
         c.execute('''CREATE TABLE IF NOT EXISTS inventory (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             code TEXT NOT NULL,
@@ -60,6 +67,8 @@ class SalesPurchaseAssistant(Star):
             extra TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+        
+        # 求购记录表
         c.execute('''CREATE TABLE IF NOT EXISTS purchase_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             code TEXT NOT NULL,
@@ -71,6 +80,8 @@ class SalesPurchaseAssistant(Star):
             status TEXT DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+        
+        # 报价记录表
         c.execute('''CREATE TABLE IF NOT EXISTS quote_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             request_id INTEGER,
@@ -87,6 +98,8 @@ class SalesPurchaseAssistant(Star):
             status TEXT DEFAULT 'sent',
             operator_id TEXT
         )''')
+        
+        # 供应信息表
         c.execute('''CREATE TABLE IF NOT EXISTS supply_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             supplier_qq TEXT,
@@ -99,6 +112,8 @@ class SalesPurchaseAssistant(Star):
             recorded_by TEXT,
             recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+        
+        # 报价模板表
         c.execute('''CREATE TABLE IF NOT EXISTS quote_templates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT UNIQUE NOT NULL,
@@ -111,6 +126,8 @@ class SalesPurchaseAssistant(Star):
             default_content = "【报价】\n商品编码：{code}\n商品名称：{name}\n数量：{quantity}\n单价：{price}元\n总价：{total}元\n如有需要请联系我。"
             c.execute("INSERT INTO quote_templates (name, content, variables) VALUES (?, ?, ?)",
                       ("标准模板", default_content, json.dumps(["code","name","quantity","price","total"])))
+        
+        # 自动报价规则表
         c.execute('''CREATE TABLE IF NOT EXISTS auto_quote_rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             rule_name TEXT,
@@ -121,6 +138,8 @@ class SalesPurchaseAssistant(Star):
             enabled INTEGER DEFAULT 1,
             priority INTEGER DEFAULT 0
         )''')
+        
+        # 用户表
         c.execute('''CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE,
@@ -129,6 +148,8 @@ class SalesPurchaseAssistant(Star):
             role TEXT DEFAULT 'user',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+        
+        # 配置表
         c.execute('''CREATE TABLE IF NOT EXISTS config (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -137,10 +158,12 @@ class SalesPurchaseAssistant(Star):
         row = c.fetchone()
         if row:
             self.default_template_id = int(row[0])
+        
         conn.commit()
         conn.close()
         logger.info("数据库初始化完成")
 
+    # ---------------------- 辅助方法 ----------------------
     def classify_message(self, text: str) -> str:
         text_lower = text.lower()
         if any(kw in text_lower for kw in PURCHASE_KEYWORDS):
@@ -290,6 +313,104 @@ class SalesPurchaseAssistant(Star):
         conn.commit()
         conn.close()
 
+    # ---------------------- TXT 保存功能 ----------------------
+    def _save_message_to_txt(self, event: AstrMessageEvent):
+        """将消息保存到本地 TXT 文件，按日期分文件"""
+        try:
+            now = datetime.now()
+            filename = f"messages_{now.strftime('%Y-%m-%d')}.txt"
+            filepath = self.messages_dir / filename
+            
+            group_id = event.get_group_id()
+            sender_id = event.get_sender_id()
+            sender_name = event.get_sender_name() or sender_id
+            text = event.get_plain_text() or ""
+            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+            
+            # 消息格式：时间 | 群号 | 发送者ID(昵称) | 内容
+            line = f"{timestamp} | 群:{group_id if group_id else '私聊'} | {sender_id}({sender_name}) | {text}\n"
+            
+            with open(filepath, 'a', encoding='utf-8') as f:
+                f.write(line)
+            logger.debug(f"消息已保存到 {filepath}")
+        except Exception as e:
+            logger.error(f"保存消息到TXT失败: {e}")
+
+    # ---------------------- 消息监听（核心） ----------------------
+    async def on_message(self, event: AstrMessageEvent):
+        # 1. 先保存原始消息到 TXT 文件
+        self._save_message_to_txt(event)
+        
+        try:
+            group_id = event.get_group_id()
+            is_group = group_id is not None
+            sender_name = event.get_sender_name() or event.get_sender_id()
+            text = event.get_plain_text()
+            
+            logger.info(f"收到消息 | 群:{group_id} | 发送者:{sender_name} | 内容:{text[:50]}")
+            
+            if is_group and self.target_groups and str(group_id) not in [str(g) for g in self.target_groups]:
+                logger.info(f"群 {group_id} 不在监听列表中，已忽略")
+                return
+            
+            if not text:
+                return
+            
+            msg_type = self.classify_message(text)
+            logger.info(f"消息分类: {msg_type}")
+            
+            if msg_type == 'other':
+                return
+            
+            codes = self.extract_codes(text)
+            if not codes:
+                logger.warning("未提取到编码")
+                return
+            logger.info(f"提取到编码: {codes}")
+            
+            sender_id = event.get_sender_id()
+            
+            for code in codes:
+                quantity = self.extract_quantity(text) or 1
+                
+                if msg_type in ('purchase', 'inquiry'):
+                    request_id = self.save_purchase_request(code, text, sender_id, sender_name, group_id, quantity)
+                    
+                    if msg_type == 'purchase' or (msg_type == 'inquiry' and self.auto_quote_enabled):
+                        success = await self.auto_quote_for_request(event, request_id, code, sender_id, sender_name, quantity)
+                        if success:
+                            continue
+                    
+                    inventory = self.match_inventory(code)
+                    if inventory:
+                        reply = f"🔍 收到{ '求购' if msg_type=='purchase' else '询价' }：{code}\n"
+                        reply += f"📦 匹配到库存：{inventory['code']} {inventory['product_name']}\n"
+                        if inventory['price']:
+                            reply += f"💰 参考价：{inventory['price']}元\n"
+                        reply += f"📞 供应商QQ：{inventory['supplier_qq']}\n"
+                        reply += "💡 如需报价，请私聊机器人使用 /quote 命令"
+                    else:
+                        reply = f"✅ 已记录{ '求购' if msg_type=='purchase' else '询价' }信息：{code}"
+                    
+                    yield event.plain_result(reply)
+                
+                elif msg_type == 'supply':
+                    price = self.extract_price(text)
+                    quantity = self.extract_quantity(text) or 0
+                    self.save_supply_record(sender_id, sender_name, code, "", quantity, price, text, sender_id)
+                    supplies = self.match_supply_records(code)
+                    if len(supplies) >= 2:
+                        min_price = supplies[0]['price']
+                        min_supplier = supplies[0]['supplier_name']
+                        reply = f"✅ 已记录供应商报价：{code} 价格 {price}元\n"
+                        reply += f"📊 当前该商品最低报价：{min_price}元（来自 {min_supplier}）"
+                    else:
+                        reply = f"✅ 已记录供应信息：{code} 价格 {price}元"
+                    yield event.plain_result(reply)
+                    
+        except Exception as e:
+            logger.error(f"消息处理异常: {e}", exc_info=True)
+
     # ---------------------- 命令 ----------------------
     @command("quote")
     async def manual_quote(self, event: AstrMessageEvent, code_or_id: str = None):
@@ -427,88 +548,6 @@ class SalesPurchaseAssistant(Star):
         conn.close()
         self.default_template_id = template_id
         yield event.plain_result(f"已设置默认报价模板ID: {template_id}")
-
-    # ---------------------- 消息监听（核心，带日志和多编码回复） ----------------------
-    async def on_message(self, event: AstrMessageEvent):
-        try:
-            group_id = event.get_group_id()
-            is_group = group_id is not None
-            sender_name = event.get_sender_name() or event.get_sender_id()
-            text = event.get_plain_text()
-            
-            # 打印收到的消息，便于调试
-            logger.info(f"收到消息 | 群:{group_id} | 发送者:{sender_name} | 内容:{text[:50]}")
-            
-            # 群聊过滤
-            if is_group and self.target_groups and str(group_id) not in [str(g) for g in self.target_groups]:
-                logger.info(f"群 {group_id} 不在监听列表中，已忽略")
-                return
-            
-            if not text:
-                return
-            
-            msg_type = self.classify_message(text)
-            logger.info(f"消息分类: {msg_type}")
-            
-            if msg_type == 'other':
-                return
-            
-            # 提取所有编码
-            codes = self.extract_codes(text)
-            if not codes:
-                logger.warning("未提取到编码")
-                return
-            logger.info(f"提取到编码: {codes}")
-            
-            sender_id = event.get_sender_id()
-            
-            # 处理每个编码（分别回复）
-            for code in codes:
-                quantity = self.extract_quantity(text) or 1
-                
-                # 销售侧：求购/询价
-                if msg_type in ('purchase', 'inquiry'):
-                    request_id = self.save_purchase_request(code, text, sender_id, sender_name, group_id, quantity)
-                    
-                    # 尝试自动报价
-                    if msg_type == 'purchase' or (msg_type == 'inquiry' and self.auto_quote_enabled):
-                        success = await self.auto_quote_for_request(event, request_id, code, sender_id, sender_name, quantity)
-                        if success:
-                            # 自动报价成功，跳过手动回复
-                            continue
-                    
-                    # 未自动报价：匹配库存并提示
-                    inventory = self.match_inventory(code)
-                    if inventory:
-                        reply = f"🔍 收到{ '求购' if msg_type=='purchase' else '询价' }：{code}\n"
-                        reply += f"📦 匹配到库存：{inventory['code']} {inventory['product_name']}\n"
-                        if inventory['price']:
-                            reply += f"💰 参考价：{inventory['price']}元\n"
-                        reply += f"📞 供应商QQ：{inventory['supplier_qq']}\n"
-                        reply += "💡 如需报价，请私聊机器人使用 /quote 命令"
-                    else:
-                        reply = f"✅ 已记录{ '求购' if msg_type=='purchase' else '询价' }信息：{code}"
-                    
-                    yield event.plain_result(reply)
-                
-                # 采购侧：供应信息
-                elif msg_type == 'supply':
-                    price = self.extract_price(text)
-                    quantity = self.extract_quantity(text) or 0
-                    # 保存供应记录
-                    self.save_supply_record(sender_id, sender_name, code, "", quantity, price, text, sender_id)
-                    supplies = self.match_supply_records(code)
-                    if len(supplies) >= 2:
-                        min_price = supplies[0]['price']
-                        min_supplier = supplies[0]['supplier_name']
-                        reply = f"✅ 已记录供应商报价：{code} 价格 {price}元\n"
-                        reply += f"📊 当前该商品最低报价：{min_price}元（来自 {min_supplier}）"
-                    else:
-                        reply = f"✅ 已记录供应信息：{code} 价格 {price}元"
-                    yield event.plain_result(reply)
-                    
-        except Exception as e:
-            logger.error(f"消息处理异常: {e}", exc_info=True)
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         sender = str(event.get_sender_id())
