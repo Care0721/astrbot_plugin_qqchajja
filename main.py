@@ -19,7 +19,7 @@ PURCHASE_PATTERNS = [
     r'^([A-Za-z0-9]+[-][A-Za-z0-9]+[-]?\d*)$',  # 通用格式
 ]
 
-@register("purchase_match", "你的名字", "QQ求购信息采集与匹配插件", "1.0.0")
+@register("purchase_match", "Care", "qq查价", "1.3.0")
 class PurchaseMatchPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
